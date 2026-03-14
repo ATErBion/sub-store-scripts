@@ -1,3 +1,30 @@
+/**
+ *  使用说明：
+ *   - sub-store，点击订阅编辑-脚本操作-添加脚本-添加参数 #showLastUpdate=true
+ *   https://raw.githubusercontent.com/sinspired/sub-store-scripts/main/surge/modules/sub-store-scripts/sub-info/node.js#showLastUpdate
+ * 支持的 URL 参数（通过订阅链接 # 后的 JSON 或 querystring 传入）：
+ *   - resetDay    : 重置日（数字）
+ *   - startDate   : 计费周期起始日期（YYYY-MM-DD）
+ *   - cycleDays   : 计费周期日（数字）
+ *   - showRemaining : 是否显示剩余流量而不是已用流量（布尔）
+ *   - showLastUpdate : 是否显示最后更新时间（布尔）
+ *
+ * 服务端返回的扩展字段（subscription-userinfo 中的非标准字段）：
+ *   - last_update : 最近一次更新的时间戳字符串（格式 "YYYY-MM-DD HH:mm:ss"）
+ *   - next_update : 下次重置的绝对时间字符串（格式 "YYYY-MM-DD HH:mm:ss"）
+ *   - plan_name   : 套餐名称（字符串）
+ *   - reset_hour  : 距离下次重置的小时数（数字，<24h 时存在）
+ *   - reset_day   : 距离下次重置的整天数（数字，≥24h 时存在）
+ *
+ * 预期的 name 格式：
+ *   - 当 showLastUpdate = true 且 last_update 存在：
+ *       "♾️ 03-14 10:55 | 151.71 MB | 22 点重置 | Subs-Check-Pro [🇰🇿]"
+ *       （更新时间、已用/剩余流量、重置提示、套餐名，最后保留原始节点国旗）
+ *
+ *   - 当 showLastUpdate = false：
+ *       "🇨🇳 流量 1.2 GB / 10 GB | 5 天 | 2026-03-14 [🇨🇳]"
+ *       （流量信息、剩余天数、到期日期，最后保留原始节点名）
+ */
 async function operator(proxies = [], targetPlatform, context) {
   let args = $arguments || {}
   const $ = $substore
