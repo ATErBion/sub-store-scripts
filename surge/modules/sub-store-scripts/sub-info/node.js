@@ -86,7 +86,7 @@ async function operator(proxies = [], targetPlatform, context) {
     }
   }
 
-  // 解析扩展字段（last_update / plan_name / reset_hour 等非标准字段）
+  // 解析扩展字段（last_update / next_update / plan_name / reset_hour / reset_day 等非标准字段）
   function parseExtendedFields(raw = '') {
     const result = {}
     for (const segment of raw.split(/[;,]/)) {
@@ -99,12 +99,67 @@ async function operator(proxies = [], targetPlatform, context) {
     return result
   }
 
-  // 格式化重置剩余时间：< 24 小时显示小时数，否则显示天数
-  function formatResetTime(hours) {
-    if (hours == null || isNaN(hours) || hours < 0) return ''
-    if (hours < 24) return `${hours}h 后重置`
-    const days = Math.round(hours / 24)
-    return `${days}天后重置`
+  /**
+   * 格式化重置提示文案。
+   *
+   * 信息字段语义：
+   *   next_update  - 下次重置的绝对时间字符串（始终存在），格式 "YYYY-MM-DD HH:mm:ss"
+   *   reset_hour   - 重置时刻的小时数，仅当距重置 < 24h 时存在
+   *   reset_day    - 距下次重置的剩余整天数，仅当距重置 ≥ 24h 时存在
+   *
+   * 显示逻辑（优先级从高到低）：
+   *   1. next_update 已过期（服务端新一轮检测已完成）→ "订阅可更新"
+   *   2. reset_day 存在（≥ 24h）                    → "N 天后重置"
+   *   3. reset_hour 存在（< 24h）                   → "今日 H 点重置" / "X 小时后重置"
+   *   4. 兜底                                        → ''
+   */
+  function formatResetTime(extFields) {
+    const nextUpdateStr = extFields['next_update']
+    const resetHourStr = extFields['reset_hour']
+    const resetDayStr = extFields['reset_day']
+
+    // 1. 解析 next_update，判断是否已过期
+    if (nextUpdateStr) {
+      // 服务端格式 "2006-01-02 15:04:05"，替换空格为 T 以兼容 Safari/iOS
+      const nextTime = new Date(nextUpdateStr.replace(' ', 'T'))
+      if (!isNaN(nextTime.getTime())) {
+        const remainingMs = nextTime.getTime() - Date.now()
+        if (remainingMs <= 0) {
+          // 下次重置时刻已过：服务端已完成新一轮检测，有新节点可用
+          return '订阅可更新'
+        }
+      }
+    }
+
+    // 2. reset_day：剩余整天数（服务端 remaining ≥ 24h 时写入）
+    if (resetDayStr != null && resetDayStr !== '') {
+      const days = parseInt(resetDayStr, 10)
+      if (!isNaN(days) && days > 0) {
+        return `${days} 天后重置`
+      }
+    }
+
+    // 3. reset_hour：重置时刻小时数（Go 端 remaining < 24h 时写入）
+    if (resetHourStr != null && resetHourStr !== '') {
+      const hour = parseInt(resetHourStr, 10)
+      if (!isNaN(hour)) {
+        // 用 next_update 算剩余小时数
+        if (nextUpdateStr) {
+          const nextTime = new Date(nextUpdateStr.replace(' ', 'T'))
+          if (!isNaN(nextTime.getTime())) {
+            const remainingHours = Math.ceil((nextTime.getTime() - Date.now()) / 3_600_000)
+            if (remainingHours > 0) {
+              return remainingHours === 1
+                ? `1 小时后重置`
+                : `${hour} 点重置`
+            }
+          }
+        }
+        return `${hour} 点重置`
+      }
+    }
+
+    return ''
   }
 
   if (subInfo) {
@@ -118,7 +173,6 @@ async function operator(proxies = [], targetPlatform, context) {
     const extFields = parseExtendedFields(rawSubInfo)
     const lastUpdate = extFields['last_update']
     const planName = extFields['plan_name']
-    const resetHour = extFields['reset_hour'] != null ? parseInt(extFields['reset_hour']) : null
 
     if (args.hideExpire) {
       expires = undefined
@@ -126,15 +180,6 @@ async function operator(proxies = [], targetPlatform, context) {
     const date = expires
       ? new Date(expires * 1000).toLocaleDateString('sv') // YYYY-MM-DD
       : ''
-
-    let remainingDays
-    try {
-      remainingDays = getRmainingDays({
-        resetDay: args.resetDay,
-        startDate: args.startDate,
-        cycleDays: args.cycleDays,
-      })
-    } catch (e) { }
 
     let show = upload + download
     if (args.showRemaining) {
@@ -146,14 +191,12 @@ async function operator(proxies = [], targetPlatform, context) {
     let name
 
     if (args.showLastUpdate && lastUpdate) {
-      const shortTime = lastUpdate.slice(0, 16)
+      const shortTime = lastUpdate.slice(5, 16)
       name = `${shortTime} | ${showT.value} ${showT.unit}`
 
-      const resetStr = formatResetTime(resetHour)
+      const resetStr = formatResetTime(extFields)
       if (resetStr) {
         name = `${name} | ${resetStr}`
-      } else if (extFields['reset_day']) {
-        name = `${name} | 每月${extFields['reset_day']}日重置`
       }
 
       if (planName) {
@@ -161,12 +204,13 @@ async function operator(proxies = [], targetPlatform, context) {
       }
     } else {
       // 仅在非 showLastUpdate 模式下才需要 remainingDays
+      // 使用 URL 参数中的 cycleDays / startDate 计算剩余天数
       let remainingDays
       try {
         remainingDays = getRmainingDays({
-          resetDay: args.resetDay,
-          startDate: args.startDate,
-          cycleDays: args.cycleDays,
+          resetDay: args.resetDay,   // URL 参数：计费周期每月重置日
+          startDate: args.startDate,  // URL 参数：计费周期起始日
+          cycleDays: args.cycleDays,  // URL 参数：计费周期天数
         })
       } catch (e) { }
 
@@ -184,7 +228,7 @@ async function operator(proxies = [], targetPlatform, context) {
 
     // proxies 的最后一项
     const lastProxy = proxies[proxies.length - 1]
-    const isCompatible = lastProxy && COMPATIBLE_TYPES.has(lastProxy.type?.toLowerCase())
+    const node = lastProxy && COMPATIBLE_TYPES.has(lastProxy.type?.toLowerCase())
 
     const dummyNode = {
       type: 'ss',
@@ -194,11 +238,22 @@ async function operator(proxies = [], targetPlatform, context) {
       password: 'password',
     }
 
+    const finalName = buildNodeName(lastProxy, name)
 
     proxies.unshift({
-      ...(isCompatible ? lastProxy : dummyNode),
-      name,
+      ...(node ? lastProxy : dummyNode),
+      name: finalName,
     })
+
+  }
+
+  function buildNodeName(lastProxy, newName) {
+    const oldName = lastProxy?.name || ''
+    // 通用正则匹配国旗 emoji (Regional Indicator Symbols)
+    const flagMatch = oldName.match(/\p{RI}{2}/u)
+    const flag = flagMatch ? flagMatch[0] : ''
+
+    return `♾️ ${newName}${oldName ? ` [${flag}]` : ''}`
   }
 
   return proxies
